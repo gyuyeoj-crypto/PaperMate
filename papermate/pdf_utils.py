@@ -1,3 +1,4 @@
+"""PaperMate: resilient text extraction from research PDFs."""
 from io import BytesIO
 import re
 from pypdf import PdfReader
@@ -14,25 +15,67 @@ def normalize(text: str) -> str:
     return text.strip()
 
 
-def extract_pages(data: bytes) -> list[str]:
-    if not data or len(data) > MAX_BYTES:
-        raise ValueError("PDF 크기는 10MB 이하여야 합니다.")
-    try:
-        reader = PdfReader(BytesIO(data), strict=False)
-        if reader.is_encrypted:
+def _extract_pypdf(data: bytes) -> list[str]:
+    reader = PdfReader(BytesIO(data), strict=False)
+    if reader.is_encrypted:
+        raise ValueError("암호화된 PDF는 지원하지 않습니다.")
+    if not 1 <= len(reader.pages) <= MAX_PAGES:
+        raise ValueError(f"1~{MAX_PAGES}페이지 PDF만 지원합니다. 현재 {len(reader.pages)}페이지입니다.")
+    pages = []
+    for page in reader.pages:
+        try:
+            content = page.extract_text(extraction_mode="layout") or ""
+        except Exception:
+            # The layout extractor is fragile on some scientific PDFs.
+            try:
+                content = page.extract_text() or ""
+            except Exception:
+                content = ""
+        pages.append(normalize(content))
+    return pages
+
+
+def _extract_pymupdf(data: bytes) -> list[str]:
+    import fitz
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        if doc.needs_pass:
             raise ValueError("암호화된 PDF는 지원하지 않습니다.")
-        if not 1 <= len(reader.pages) <= MAX_PAGES:
-            raise ValueError(f"1~{MAX_PAGES}페이지 PDF만 지원합니다.")
-        pages = []
-        for page in reader.pages:
-            pages.append(normalize(page.extract_text(extraction_mode="layout") or ""))
-        if sum(len(p) for p in pages) < 100:
-            raise ValueError("텍스트를 추출할 수 없습니다. 스캔 PDF는 현재 OCR을 지원하지 않습니다.")
-        return pages
+        if not 1 <= len(doc) <= MAX_PAGES:
+            raise ValueError(f"1~{MAX_PAGES}페이지 PDF만 지원합니다. 현재 {len(doc)}페이지입니다.")
+        return [normalize(page.get_text("text", sort=True)) for page in doc]
+
+
+def extract_pages(data: bytes) -> list[str]:
+    if not data:
+        raise ValueError("PDF 파일이 비어 있습니다.")
+    if len(data) > MAX_BYTES:
+        raise ValueError("PDF 크기는 10MB 이하여야 합니다.")
+    if not data.startswith(b"%PDF-"):
+        raise ValueError("PDF 형식이 아닌 파일입니다.")
+
+    errors = []
+    try:
+        pages = _extract_pypdf(data)
+        if sum(map(len, pages)) >= 100:
+            return pages
+    except ValueError as exc:
+        # A page-limit or encrypted-PDF error should not be masked.
+        raise
+    except Exception as exc:
+        errors.append(f"pypdf: {type(exc).__name__}")
+
+    try:
+        pages = _extract_pymupdf(data)
+        if sum(map(len, pages)) >= 100:
+            return pages
     except ValueError:
         raise
     except Exception as exc:
-        raise ValueError("PDF 파싱에 실패했습니다. 유효한 텍스트 PDF인지 확인하세요.") from exc
+        errors.append(f"PyMuPDF: {type(exc).__name__}")
+
+    if errors:
+        raise ValueError("PDF 텍스트 추출에 실패했습니다 (" + ", ".join(errors) + "). PDF를 다시 다운로드하거나 PDF로 다시 저장해 보세요.")
+    raise ValueError("PDF에서 충분한 텍스트를 찾지 못했습니다. 스캔 PDF이거나 글자가 이미지로 저장된 경우 OCR이 필요합니다.")
 
 
 def split_text(text: str, size: int = 1900) -> list[str]:
