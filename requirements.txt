@@ -2,5 +2,6 @@ streamlit>=1.40,<2
 pypdf>=5.0,<7
 reportlab>=4.2,<5
 groq>=0.26,<2
-
 pymupdf>=1.24,<2
+Pillow>=10,<13
+pytesseract>=0.3.13,<1
